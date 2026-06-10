@@ -1,0 +1,249 @@
+<!--
+==================================================================
+  네이버 메이트(GEO) 자동 글쓰기봇  ·  한혜진(미세스찐) / 찐메이트 액션
+==================================================================
+  이 파일은 두 가지 용도로 쓸 수 있습니다.
+
+  [모드 A · 데모/테스트]  지금 이 상태 그대로.
+     → Claude 환경 안에서 api.anthropic.com을 직접 호출합니다.
+     → 바로 입력해보고 결과를 확인하는 용도.
+
+  [모드 B · 아임웹 실배포]  API_MODE 를 "netlify" 로 바꾸세요.
+     → 프론트는 본인 Netlify Function(/.netlify/functions/generate)만 호출.
+     → API 키는 Netlify 환경변수에 숨겨집니다. (내꺼메이커 webhook.js와 동일 구조)
+     → Netlify Function 코드는 같이 드린 generate.js 참고.
+==================================================================
+-->
+<div id="mate-root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<style>
+  :root{
+    --ink:#18315E;          /* Deep Navy — 제목·본문·버튼 베이스 */
+    --ink-soft:#88888C;     /* Steel Gray — 보조 텍스트 */
+    --line:#e2e6ee;         /* 네이비톤 중립 라인 */
+    --paper:#ffffff; --canvas:#f4f6fa;
+    --accent:#FD6811;       /* Vibrant Orange — 포인트 액센트 */
+    --accent-soft:#fff0e6;  /* 오렌지 연한 배경 */
+    --blue:#0056A6;         /* Royal Blue — 보조 */
+    --highlight:#F9E21A;    /* 강조 옐로우 — 순간 피드백에만 */
+    --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  #mate-root{
+    font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Malgun Gothic",sans-serif;
+    color:var(--ink); line-height:1.6; max-width:780px; margin:0 auto; padding:22px 16px 60px;
+  }
+  .hd{border-bottom:2px solid var(--ink); padding-bottom:14px; margin-bottom:24px;}
+  .hd .eyebrow{font-size:12px; letter-spacing:.18em; color:var(--accent); font-weight:700; text-transform:uppercase;}
+  .hd h1{font-size:25px; margin:6px 0 4px; letter-spacing:-.02em;}
+  .hd p{margin:0; color:var(--ink-soft); font-size:14px;}
+
+  .field{margin-bottom:18px;}
+  .field label{display:block; font-weight:700; font-size:14px; margin-bottom:6px;}
+  .field .hint{font-weight:400; color:var(--ink-soft); font-size:12.5px;}
+  .field textarea, .field input, .field select{
+    width:100%; border:1px solid var(--line); border-radius:10px; padding:11px 13px;
+    font-size:14.5px; font-family:inherit; background:var(--paper); color:var(--ink); resize:vertical;
+  }
+  .field textarea:focus, .field input:focus, .field select:focus{
+    outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft);
+  }
+  .row{display:flex; gap:12px;} .row .field{flex:1;}
+
+  .go{
+    width:100%; border:none; border-radius:12px; background:var(--ink); color:#fff;
+    font-size:16px; font-weight:700; padding:15px; cursor:pointer; font-family:inherit;
+    transition:background .15s;
+  }
+  .go:hover{background:var(--accent);}
+  .go:disabled{background:#bcb8b0; cursor:not-allowed;}
+
+  .out{margin-top:30px;}
+  .out-bar{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;}
+  .out-bar .tag{font-size:12px; letter-spacing:.12em; color:var(--accent); font-weight:700;}
+  .copy{border:1px solid var(--line); background:var(--paper); border-radius:8px; padding:7px 14px;
+    font-size:13px; font-weight:600; cursor:pointer; font-family:inherit;}
+  .copy:hover{border-color:var(--accent); color:var(--accent);}
+  .paper{
+    background:var(--paper); border:1px solid var(--line); border-left:4px solid var(--accent);
+    border-radius:var(--radius); padding:26px 28px; font-size:15px;
+  }
+  .paper h1,.paper h2,.paper h3{letter-spacing:-.01em; line-height:1.35;}
+  .paper h1{font-size:21px; margin:.2em 0 .6em;}
+  .paper h2{font-size:18px; margin:1.4em 0 .5em; padding-top:.4em;}
+  .paper h3{font-size:16px;}
+  .paper table{border-collapse:collapse; width:100%; margin:1em 0; font-size:14px;}
+  .paper th,.paper td{border:1px solid var(--line); padding:8px 10px; text-align:left;}
+  .paper th{background:var(--canvas);}
+  .paper blockquote{border-left:3px solid var(--accent); margin:1em 0; padding:.4em 1em;
+    background:var(--accent-soft); border-radius:0 8px 8px 0;}
+  .paper code{background:var(--canvas); padding:1px 5px; border-radius:4px; font-size:.92em;}
+  .loading{color:var(--ink-soft); font-size:14px; text-align:center; padding:30px;}
+  .err{color:var(--accent); background:var(--accent-soft); padding:14px; border-radius:10px; font-size:14px;}
+  .count{font-size:12px; color:var(--ink-soft); text-align:right; margin-top:4px;}
+</style>
+
+<script>
+// ===== 설정 =====================================================
+const API_MODE = "netlify";   // "claude" = 데모 / "netlify" = 아임웹 실배포
+const NETLIFY_ENDPOINT = "/.netlify/functions/generate";
+
+// ===== 범용 시스템 프롬프트 (봇의 두뇌) ==========================
+const SYSTEM_PROMPT = `당신은 네이버 검색 알고리즘(C-Rank, D.I.A+)과 네이버 메이트(AI 브리핑) 인용 구조를 완벽히 이해하는 20년 차 콘텐츠 전략가입니다. 어떤 분야(맛집·여행·육아·뷰티·IT/가전·재테크·운동·반려동물·교육 등)의 자료가 들어와도, 그 분야에 맞는 '사람의 경험이 살아있는 진정성 있는 블로그 글'을 씁니다.
+
+[먼저 분야를 판별하라]
+입력된 주제와 경험을 보고 글의 분야와 성격을 스스로 판단한 뒤, 그 분야의 독자가 실제로 검색하는 맥락에 맞춰 작성하라. (예: 가전이면 사용기간·실측치, 맛집이면 메뉴·웨이팅·재방문 의사, 재테크면 금액·기간·수익률, 여행이면 동선·소요시간·예약 여부)
+
+[네이버 메이트 5대 핵심 전략 — 모든 분야 공통 적용]
+1. TPO 한정: 도입부에서 '누가, 언제, 어떤 상황에서' 이 글이 필요한지 구체적으로 좁혀라.
+2. 절차·수치화: 일반론 금지. 시간 순서나 단계별 흐름으로, 구체적 수치와 직접 겪은 시행착오를 서술하라.
+3. 대안 비교: 한 가지만 칭찬하지 말 것. 고민했던 A안·B안의 장단점과 '최종 선택의 결정적 이유'를 밝혀라.
+4. 실제 결과(Real Data): 스펙시트·뻔한 정보 나열 금지. 실제 사용 환경, 직접 측정·관찰한 결과, 예상과 달랐던 아쉬운 점을 근거와 함께 써라.
+5. 구조·텍스트화: [소제목], 표, 불릿(-)을 적극 활용. 이미지 자리는 [이미지 삽입: (사진 묘사)] 로 지정하되, 그 이미지의 핵심을 반드시 텍스트로도 요약하라(AI 인용을 위해).
+
+[제약]
+- 분량: 공백 포함 1,800자 내외. 부족하면 상황 묘사·주관적 감상·주의사항으로 채워라.
+- 금지어: "일반적으로", "많은 분들이", "전망이 좋고 합리적인" 등 누구나 쓰는 추상적 표현 금지.
+- AI 티가 나는 매끈하고 균질한 문체 금지. 사람이 직접 겪은 듯한 디테일과 솔직한 감정을 넣어라.
+- 사실을 지어내지 말 것. 입력에 없는 구체 수치가 필요하면 [숫자 입력] 처럼 사용자가 채울 자리로 비워두어라.
+
+[출력 구조 — Markdown]
+# (타깃·핵심키워드·구체 수치/베네핏이 담긴 제목)
+
+> **핵심 요약**
+> - 추천 타깃: …
+> - 주요 내용: … (1줄)
+> - 결정적 팁: …
+> - 소요시간/비용/기간 등 핵심 수치: …
+> - 주의사항: …
+
+## 1. 구체적 상황과 글을 쓰게 된 진짜 이유 (TPO)
+## 2. 대안 비교와 결정적 이유 (A vs B)
+## 3. 절차·실행·구체적 결과 (가장 긴 분량, [이미지 삽입:…] 포함)
+## 4. 창작자만의 치트키와 주의사항
+## 5. 이런 분께 추천합니다 (요약 + 진정성 있는 마무리)
+
+오직 완성된 블로그 글(Markdown)만 출력하라. 설명·머리말·맺음말 없이 글 본문만.`;
+
+// ===== UI =======================================================
+const root = document.getElementById("mate-root");
+root.innerHTML = `
+  <div class="hd">
+    <div class="eyebrow">찐메이트 액션 · GEO 글쓰기</div>
+    <h1>네이버 메이트 자동 글쓰기봇</h1>
+    <p>경험만 입력하면, 네이버 AI가 인용하는 구조로 1,800자 글을 만들어 드립니다.</p>
+  </div>
+
+  <div class="field">
+    <label>① 주제 / 분야 <span class="hint">— 무슨 글인지 한 줄로 (예: 다이슨 무선청소기 3개월 사용기 / 양양 서피비치 가족여행)</span></label>
+    <input id="f-topic" placeholder="예) 30평대 신혼집 로봇청소기 후기">
+  </div>
+
+  <div class="field">
+    <label>② 타깃 & 상황(TPO) <span class="hint">— 누가, 언제, 어떤 상황에서 이 글을 찾을까요?</span></label>
+    <textarea id="f-tpo" rows="2" placeholder="예) 맞벌이라 청소할 시간 없고, 반려묘 2마리 키워서 털 때문에 고민인 30대 부부"></textarea>
+  </div>
+
+  <div class="field">
+    <label>③ 직접 겪은 절차 · 수치 · 경험 <span class="hint">— 시간순/단계별로. 숫자가 있으면 신뢰도가 급상승합니다.</span></label>
+    <textarea id="f-exp" rows="4" placeholder="예) 3개월 매일 1회 돌림 / 흡입력 단계는 2단으로 고정 / 충전 4시간에 50분 작동 / 문턱 1.5cm는 못 넘음 / 카펫에서 헤맴"></textarea>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label>④ 비교했던 대안 (A vs B) <span class="hint">— 고민했던 다른 선택지</span></label>
+      <textarea id="f-alt" rows="3" placeholder="예) A: 유선청소기(저렴·강력하나 번거로움) / B: 이 제품(비싸지만 자동)"></textarea>
+    </div>
+    <div class="field">
+      <label>⑤ 나만의 팁 · 실패담 <span class="hint">— 직접 겪어야 아는 것</span></label>
+      <textarea id="f-tip" rows="3" placeholder="예) 매트는 미리 걷어두기 / 물걸레 패드는 격주 교체가 적당"></textarea>
+    </div>
+  </div>
+
+  <div class="field" style="max-width:220px;">
+    <label>⑥ 문체</label>
+    <select id="f-tone">
+      <option value="정중한 해요체(~했어요, ~합니다)">해요체 (~했어요)</option>
+      <option value="담백한 평어체(~했다, ~이다)">평어체 (~했다)</option>
+    </select>
+  </div>
+
+  <button class="go" id="go">글 생성하기</button>
+  <div id="out" class="out"></div>
+`;
+
+const $ = id => document.getElementById(id);
+const out = $("out");
+
+$("go").addEventListener("click", async () => {
+  const topic = $("f-topic").value.trim();
+  const exp   = $("f-exp").value.trim();
+  if(!topic || !exp){
+    out.innerHTML = `<div class="err">① 주제와 ③ 경험은 꼭 입력해 주세요. 봇이 지어내지 않고 실제 경험으로 글을 씁니다.</div>`;
+    return;
+  }
+
+  const userMsg =
+`[주제/분야] ${topic}
+[타깃·상황(TPO)] ${$("f-tpo").value.trim() || "(입력 없음 — 주제에 맞게 설정)"}
+[직접 겪은 절차·수치·경험] ${exp}
+[비교했던 대안] ${$("f-alt").value.trim() || "(입력 없음 — 자연스러우면 생략 가능)"}
+[나만의 팁·실패담] ${$("f-tip").value.trim() || "(입력 없음)"}
+[문체] ${$("f-tone").value}
+
+위 자료로 네이버 메이트 최적화 블로그 글을 작성하라.`;
+
+  $("go").disabled = true; $("go").textContent = "작성 중…";
+  out.innerHTML = `<div class="loading">✍️ 네이버 메이트가 사랑하는 구조로 글을 쓰는 중입니다…</div>`;
+
+  try{
+    const text = await generate(userMsg);
+    out.innerHTML = `
+      <div class="out-bar">
+        <span class="tag">완성된 글</span>
+        <button class="copy" id="copy">복사하기</button>
+      </div>
+      <div class="paper" id="paper">${marked.parse(text)}</div>
+      <div class="count">글자수: ${text.replace(/\s/g,"").length}자 (공백 제외)</div>`;
+    $("copy").addEventListener("click", () => {
+      navigator.clipboard.writeText(text);
+      const b = $("copy");
+      b.textContent = "복사됨 ✓";
+      b.style.background = "var(--highlight)"; b.style.borderColor = "var(--highlight)"; b.style.color = "var(--ink)";
+      setTimeout(()=>{ b.textContent="복사하기"; b.style.background=""; b.style.borderColor=""; b.style.color=""; }, 1500);
+    });
+  }catch(e){
+    out.innerHTML = `<div class="err">생성에 실패했어요. 잠시 후 다시 시도해 주세요.<br><small>${e.message}</small></div>`;
+  }finally{
+    $("go").disabled = false; $("go").textContent = "글 생성하기";
+  }
+});
+
+// ===== 생성 함수 (모드 분기) =====================================
+async function generate(userMsg){
+  if(API_MODE === "netlify"){
+    // [모드 B] 본인 Netlify Function 호출 — API 키 노출 없음
+    const r = await fetch(NETLIFY_ENDPOINT, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ system: SYSTEM_PROMPT, message: userMsg })
+    });
+    if(!r.ok) throw new Error("server "+r.status);
+    const d = await r.json();
+    return d.text;
+  } else {
+    // [모드 A] 데모 — Claude 환경에서 직접 호출
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        model:"claude-sonnet-4-20250514",
+        max_tokens:1000,
+        system: SYSTEM_PROMPT,
+        messages:[{role:"user", content:userMsg}]
+      })
+    });
+    const d = await r.json();
+    return d.content.filter(b=>b.type==="text").map(b=>b.text).join("\n");
+  }
+}
+</script>
