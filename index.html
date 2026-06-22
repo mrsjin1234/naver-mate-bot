@@ -2,16 +2,11 @@
 ==================================================================
   네이버 메이트(GEO) 자동 글쓰기봇  ·  한혜진(미세스찐) / 찐메이트 액션
 ==================================================================
-  이 파일은 두 가지 용도로 쓸 수 있습니다.
-
-  [모드 A · 데모/테스트]  지금 이 상태 그대로.
-     → Claude 환경 안에서 api.anthropic.com을 직접 호출합니다.
-     → 바로 입력해보고 결과를 확인하는 용도.
-
-  [모드 B · 아임웹 실배포]  API_MODE 를 "netlify" 로 바꾸세요.
-     → 프론트는 본인 Netlify Function(/.netlify/functions/generate)만 호출.
-     → API 키는 Netlify 환경변수에 숨겨집니다. (내꺼메이커 webhook.js와 동일 구조)
-     → Netlify Function 코드는 같이 드린 generate.js 참고.
+  [이번 수정] 복사 버튼 안정화
+   - 기존: navigator.clipboard.writeText 만 호출 + 성공/실패 무시 + 무조건 "복사됨 ✓"
+     → 아임웹 iframe·모바일에서 조용히 실패해 "일부만 복사"되는 증상 발생
+   - 수정: ① Clipboard API await/try-catch ② textarea+execCommand 폴백
+           ③ 전체 강제 선택(setSelectionRange) ④ 실제 성공 시에만 ✓
 ==================================================================
 -->
 <div id="mate-root"></div>
@@ -176,6 +171,46 @@ root.innerHTML = `
 const $ = id => document.getElementById(id);
 const out = $("out");
 
+// ===== 안정적인 복사 함수 (이번 수정의 핵심) =====================
+// 아임웹 iframe·모바일에서 Clipboard API가 실패/부분복사 되는 문제를
+// ① Clipboard API await/try-catch ② textarea+execCommand 폴백
+// ③ 전체 강제 선택(setSelectionRange) 으로 막는다. 성공 여부(boolean) 반환.
+async function copyAllText(textToCopy){
+  // 1) 최신 Clipboard API 시도
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(textToCopy);
+      return true;
+    }
+  }catch(_){ /* 막힌 환경 — 아래 폴백으로 */ }
+
+  // 2) 폴백: 숨은 textarea + execCommand('copy')
+  //    (iframe·구형/모바일 환경에서 더 안정적, 전체 선택을 강제)
+  try{
+    const ta = document.createElement("textarea");
+    ta.value = textToCopy;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.left = "0";
+    ta.style.width = "1px";
+    ta.style.height = "1px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+
+    ta.focus();
+    ta.select();
+    // iOS 사파리 등에서 select()가 일부만 잡는 현상 방지 — 전체 범위 강제 선택
+    ta.setSelectionRange(0, textToCopy.length);
+
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  }catch(_){
+    return false;
+  }
+}
+
 $("go").addEventListener("click", async () => {
   const topic = $("f-topic").value.trim();
   const exp   = $("f-exp").value.trim();
@@ -212,12 +247,26 @@ $("go").addEventListener("click", async () => {
     const text = await generate(userMsg, (partial) => render(partial, false));
     render(text, true);
 
-    $("copy").addEventListener("click", () => {
-      navigator.clipboard.writeText(text);
+    // ===== 복사 버튼 — 실제 성공 여부에 따라 피드백 =====
+    $("copy").addEventListener("click", async () => {
       const b = $("copy");
-      b.textContent = "복사됨 ✓";
-      b.style.background = "var(--highlight)"; b.style.borderColor = "var(--highlight)"; b.style.color = "var(--ink)";
-      setTimeout(()=>{ b.textContent="복사하기"; b.style.background=""; b.style.borderColor=""; b.style.color=""; }, 1500);
+      b.disabled = true;
+      const ok = await copyAllText(text);
+
+      if(ok){
+        b.textContent = "복사됨 ✓";
+        b.style.background = "var(--highlight)"; b.style.borderColor = "var(--highlight)"; b.style.color = "var(--ink)";
+        setTimeout(()=>{
+          b.textContent="복사하기"; b.style.background=""; b.style.borderColor=""; b.style.color=""; b.disabled=false;
+        }, 1500);
+      }else{
+        // 복사가 막힌 환경 — 회원에게 솔직히 안내 (성공한 척 금지)
+        b.textContent = "복사 안 됨 — 글을 길게 눌러 전체 복사해 주세요";
+        b.style.background = "var(--accent-soft)"; b.style.borderColor = "var(--accent)"; b.style.color = "var(--accent)";
+        setTimeout(()=>{
+          b.textContent="다시 복사"; b.style.background=""; b.style.borderColor=""; b.style.color=""; b.disabled=false;
+        }, 2600);
+      }
     });
   }catch(e){
     out.innerHTML = `<div class="err">생성에 실패했어요. 잠시 후 다시 시도해 주세요.<br><small>${e.message}</small></div>`;
