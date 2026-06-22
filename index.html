@@ -2,11 +2,14 @@
 ==================================================================
   네이버 메이트(GEO) 자동 글쓰기봇  ·  한혜진(미세스찐) / 찐메이트 액션
 ==================================================================
-  [이번 수정] 복사 버튼 안정화
-   - 기존: navigator.clipboard.writeText 만 호출 + 성공/실패 무시 + 무조건 "복사됨 ✓"
-     → 아임웹 iframe·모바일에서 조용히 실패해 "일부만 복사"되는 증상 발생
-   - 수정: ① Clipboard API await/try-catch ② textarea+execCommand 폴백
-           ③ 전체 강제 선택(setSelectionRange) ④ 실제 성공 시에만 ✓
+  [이번 수정] 복사 시 본문이 앞 ~10줄에서 잘리는 문제 해결
+   - 원인: 스트리밍 중 섞여 들어온 '보이지 않는 제어문자(NUL 등)'가
+           클립보드 텍스트를 그 지점에서 끊어버림.
+           화면(marked/HTML)은 이 문자를 무시하고 전체를 그려주기 때문에
+           "화면엔 전체가 보이는데 복사하면 일부만" 되는 현상이 발생.
+   - 해결: (1) cleanText()로 NUL·제어문자 제거(개행·탭은 유지)
+           (2) 글 수신 단계와 복사 단계 양쪽에서 정리
+           (3) Clipboard API await/try-catch + textarea 폴백 + 성공 시에만 OK
 ==================================================================
 -->
 <div id="mate-root"></div>
@@ -14,14 +17,14 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <style>
   :root{
-    --ink:#18315E;          /* Deep Navy — 제목·본문·버튼 베이스 */
-    --ink-soft:#88888C;     /* Steel Gray — 보조 텍스트 */
-    --line:#e2e6ee;         /* 네이비톤 중립 라인 */
+    --ink:#18315E;          /* Deep Navy */
+    --ink-soft:#88888C;     /* Steel Gray */
+    --line:#e2e6ee;
     --paper:#ffffff; --canvas:#f4f6fa;
-    --accent:#FD6811;       /* Vibrant Orange — 포인트 액센트 */
-    --accent-soft:#fff0e6;  /* 오렌지 연한 배경 */
-    --blue:#0056A6;         /* Royal Blue — 보조 */
-    --highlight:#F9E21A;    /* 강조 옐로우 — 순간 피드백에만 */
+    --accent:#FD6811;       /* Vibrant Orange */
+    --accent-soft:#fff0e6;
+    --blue:#0056A6;
+    --highlight:#F9E21A;
     --radius:14px;
   }
   *{box-sizing:border-box;}
@@ -82,7 +85,17 @@
 <script>
 // ===== 설정 =====================================================
 const API_MODE = "netlify";   // "claude" = 데모 / "netlify" = 아임웹 실배포
-const NETLIFY_ENDPOINT = "/api/generate";   // Edge Function 주소
+const NETLIFY_ENDPOINT = "/api/generate";
+
+// ===== [핵심 수정] 보이지 않는 제어문자 제거 ====================
+// 클립보드를 중간에서 끊어버리는 NUL(\u0000) 및 기타 제어문자를 제거한다.
+// 단, 정상 문자인 줄바꿈(\n, \r)과 탭(\t)은 그대로 유지한다.
+function cleanText(s){
+  if(!s) return "";
+  return s
+    .replace(/\u0000/g, "")
+    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+}
 
 // ===== 범용 시스템 프롬프트 (봇의 두뇌) ==========================
 const SYSTEM_PROMPT = `당신은 네이버 검색 알고리즘(C-Rank, D.I.A+)과 네이버 메이트(AI 브리핑) 인용 구조를 완벽히 이해하는 20년 차 콘텐츠 전략가입니다. 어떤 분야(맛집·여행·육아·뷰티·IT/가전·재테크·운동·반려동물·교육 등)의 자료가 들어와도, 그 분야에 맞는 '사람의 경험이 살아있는 진정성 있는 블로그 글'을 씁니다.
@@ -171,11 +184,11 @@ root.innerHTML = `
 const $ = id => document.getElementById(id);
 const out = $("out");
 
-// ===== 안정적인 복사 함수 (이번 수정의 핵심) =====================
-// 아임웹 iframe·모바일에서 Clipboard API가 실패/부분복사 되는 문제를
-// ① Clipboard API await/try-catch ② textarea+execCommand 폴백
-// ③ 전체 강제 선택(setSelectionRange) 으로 막는다. 성공 여부(boolean) 반환.
-async function copyAllText(textToCopy){
+// ===== 안정적인 복사 함수 ========================================
+// 복사 직전에도 cleanText로 한 번 더 정리한 뒤 클립보드에 넣는다.
+async function copyAllText(rawText){
+  const textToCopy = cleanText(rawText);
+
   // 1) 최신 Clipboard API 시도
   try{
     if(navigator.clipboard && window.isSecureContext){
@@ -184,25 +197,18 @@ async function copyAllText(textToCopy){
     }
   }catch(_){ /* 막힌 환경 — 아래 폴백으로 */ }
 
-  // 2) 폴백: 숨은 textarea + execCommand('copy')
-  //    (iframe·구형/모바일 환경에서 더 안정적, 전체 선택을 강제)
+  // 2) 폴백: 숨은 textarea + execCommand('copy'), 전체 범위 강제 선택
   try{
     const ta = document.createElement("textarea");
     ta.value = textToCopy;
     ta.setAttribute("readonly", "");
     ta.style.position = "fixed";
-    ta.style.top = "0";
-    ta.style.left = "0";
-    ta.style.width = "1px";
-    ta.style.height = "1px";
-    ta.style.opacity = "0";
+    ta.style.top = "0"; ta.style.left = "0";
+    ta.style.width = "1px"; ta.style.height = "1px"; ta.style.opacity = "0";
     document.body.appendChild(ta);
-
     ta.focus();
     ta.select();
-    // iOS 사파리 등에서 select()가 일부만 잡는 현상 방지 — 전체 범위 강제 선택
     ta.setSelectionRange(0, textToCopy.length);
-
     const ok = document.execCommand("copy");
     document.body.removeChild(ta);
     return ok;
@@ -233,7 +239,6 @@ $("go").addEventListener("click", async () => {
   out.innerHTML = `<div class="loading">✍️ 네이버 메이트가 사랑하는 구조로 글을 쓰는 중입니다…</div>`;
 
   try{
-    // 글이 써지는 동안 실시간으로 화면에 표시
     const render = (partial, done) => {
       out.innerHTML = `
         <div class="out-bar">
@@ -252,20 +257,14 @@ $("go").addEventListener("click", async () => {
       const b = $("copy");
       b.disabled = true;
       const ok = await copyAllText(text);
-
       if(ok){
-        b.textContent = "복사됨 ✓";
+        b.textContent = "복사됨 ✓ (전체)";
         b.style.background = "var(--highlight)"; b.style.borderColor = "var(--highlight)"; b.style.color = "var(--ink)";
-        setTimeout(()=>{
-          b.textContent="복사하기"; b.style.background=""; b.style.borderColor=""; b.style.color=""; b.disabled=false;
-        }, 1500);
+        setTimeout(()=>{ b.textContent="복사하기"; b.style.background=""; b.style.borderColor=""; b.style.color=""; b.disabled=false; }, 1500);
       }else{
-        // 복사가 막힌 환경 — 회원에게 솔직히 안내 (성공한 척 금지)
-        b.textContent = "복사 안 됨 — 글을 길게 눌러 전체 복사해 주세요";
+        b.textContent = "복사 안 됨 — 글을 길게 끌어 전체 복사해 주세요";
         b.style.background = "var(--accent-soft)"; b.style.borderColor = "var(--accent)"; b.style.color = "var(--accent)";
-        setTimeout(()=>{
-          b.textContent="다시 복사"; b.style.background=""; b.style.borderColor=""; b.style.color=""; b.disabled=false;
-        }, 2600);
+        setTimeout(()=>{ b.textContent="다시 복사"; b.style.background=""; b.style.borderColor=""; b.style.color=""; b.disabled=false; }, 2600);
       }
     });
   }catch(e){
@@ -278,7 +277,6 @@ $("go").addEventListener("click", async () => {
 // ===== 생성 함수 (모드 분기) =====================================
 async function generate(userMsg, onProgress){
   if(API_MODE === "netlify"){
-    // [모드 B] Edge Function 호출 — 스트리밍으로 받아 실시간 표시
     const r = await fetch(NETLIFY_ENDPOINT, {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({ system: SYSTEM_PROMPT, message: userMsg })
@@ -309,9 +307,8 @@ async function generate(userMsg, onProgress){
       }
     }
     if(!full) throw new Error("빈 응답");
-    return full;
+    return cleanText(full);   // [핵심] 받은 글에서 제어문자 제거 후 반환
   } else {
-    // [모드 A] 데모 — Claude 환경에서 직접 호출 (스트리밍 없음)
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({
@@ -324,7 +321,7 @@ async function generate(userMsg, onProgress){
     const d = await r.json();
     const text = d.content.filter(b=>b.type==="text").map(b=>b.text).join("\n");
     if(onProgress) onProgress(text);
-    return text;
+    return cleanText(text);   // [핵심] 동일하게 정리 후 반환
   }
 }
 </script>
